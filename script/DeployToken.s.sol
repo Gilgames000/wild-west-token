@@ -7,7 +7,7 @@ import "../src/interfaces/IMemeticSwapV1Router01.sol";
 import "forge-std/Test.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
-contract DeployWildWestToken is Test {
+contract DeployToken is Test {
     using Strings for uint256;
 
     function setUp() public view {
@@ -17,34 +17,68 @@ contract DeployWildWestToken is Test {
         );
     }
 
-    function run() external {
+    function run() external returns (WildWestToken) {
         vm.startBroadcast();
         WildWestToken wwt = new WildWestToken();
-        address memeticswapV1Pair = IMemeticSwapV1Factory(
-            wwt.router().factory()
-        ).createPair(address(wwt), address(wwt.memetic()), false);
-        wwt.setSwapPair(memeticswapV1Pair);
-        wwt.enableTrading();
+        // address memeticswapV1Pair = IMemeticSwapV1Factory(
+        //     wwt.router().factory()
+        // ).createPair(address(wwt), address(wwt.memetic()), false);
+        // wwt.setSwapPair(memeticswapV1Pair);
+        // addLiquidity(
+        //     payable(wwt),
+        //     wwt.balanceOf(msg.sender) / 2,
+        //     1000 * 10**wwt.memetic().decimals()
+        // );
+        // wwt.enableTrading();
         vm.stopBroadcast();
         console.log("WildWestToken deployed at:", address(wwt));
+
+        return wwt;
     }
 
-    function addWildWestTokenPair(address payable _wwt, address _pair)
-        external
-    {
+    function setSwapPair(address payable _wwt, address _pair) external {
         WildWestToken wwt = WildWestToken(_wwt);
-        vm.startBroadcast();
+        vm.broadcast();
+        wwt.setSwapPair(_pair);
+    }
+
+    function addAMMPair(address payable _wwt, address _pair) external {
+        WildWestToken wwt = WildWestToken(_wwt);
+        vm.broadcast();
         wwt.setAutomatedMarketMakerPair(_pair, true);
-        vm.stopBroadcast();
         console.log("Added pair:", _pair);
     }
 
     function enableTrading(address payable _wwt) external {
         WildWestToken wwt = WildWestToken(_wwt);
-        vm.startBroadcast();
+        vm.broadcast();
         wwt.enableTrading();
-        vm.stopBroadcast();
         console.log("Trading enabled");
+    }
+
+    function addLiquidity(
+        address payable _wwt,
+        uint256 _amount,
+        uint256 _amountMemetic
+    ) internal {
+        WildWestToken wwt = WildWestToken(_wwt);
+        IMemeticSwapV1Router01 router = wwt.router();
+
+        wwt.approve(address(router), _amount);
+        wwt.memetic().approve(address(router), _amountMemetic);
+        router.addLiquidity(
+            address(wwt),
+            address(wwt.memetic()),
+            _amount,
+            _amountMemetic,
+            0,
+            0,
+            // address(0xdead),
+            msg.sender,
+            block.timestamp + 30 minutes
+        );
+
+        console.log("Added liquidity");
     }
 
     function getInfo(address payable _wwt) external {
@@ -52,13 +86,23 @@ contract DeployWildWestToken is Test {
         console.log("WildWestToken deployed at:", address(wwt));
         console.log("Swap pair:", wwt.pair());
         console.log(
-            "AutomatedMarketMakerPairs:",
+            "Swap pair is AMM:",
             wwt.automatedMarketMakerPairs(wwt.pair())
         );
         console.log("TradingActive:", wwt.tradingActive());
         console.log("SwapEnabled:", wwt.swapEnabled());
         console.log("Memetic:", address(wwt.memetic()));
         console.log("SwapTokensAtAmount:", wwt.swapTokensAtAmount());
+        console.log("MarketingWallet:", address(wwt.marketingWallet()));
+        console.log(
+            "MarketingWallet ETH balance:",
+            address(wwt.marketingWallet()).balance
+        );
+        console.log("TeamWallet:", address(wwt.teamWallet()));
+        console.log(
+            "TeamWallet ETH balance:",
+            address(wwt.teamWallet()).balance
+        );
         console.log("Contract token balance:", wwt.balanceOf(address(wwt)));
         console.log("Contract ETH balance:", address(wwt).balance);
         console.log(
@@ -80,7 +124,7 @@ contract DeployWildWestToken is Test {
 
         vm.startBroadcast();
         router.swapExactTokensForTokensSupportingFeeOnTransferTokens(
-            10000 * 10**wwt.decimals(),
+            1 * 10**wwt.decimals(),
             0,
             path,
             msg.sender,
@@ -121,5 +165,21 @@ contract DeployWildWestToken is Test {
         wwt.setSwapThreshold(_amount);
         vm.stopBroadcast();
         console.log("Swap threshold set to:", _amount);
+    }
+
+    function toggleJeetTax(address payable _wwt, bool enabled) external {
+        WildWestToken wwt = WildWestToken(_wwt);
+        vm.startBroadcast();
+        wwt.toggleJeetTax(enabled);
+        vm.stopBroadcast();
+        console.log("Jeet tax enabled:", enabled);
+    }
+
+    function setJeetTax(address payable _wwt, uint256 _fee) external {
+        WildWestToken wwt = WildWestToken(_wwt);
+        vm.startBroadcast();
+        wwt.setJeetTax(_fee);
+        vm.stopBroadcast();
+        console.log("Jeet tax set to:", _fee);
     }
 }

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;
+pragma solidity 0.8.17;
 
 import "./DividendTracker.sol";
+import "./TempWallet.sol";
 import "./interfaces/IMemeticSwapV1Router01.sol";
 import "./interfaces/IMemeticSwapV1Pair.sol";
 import "./libraries/SafeMath.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/finance/PaymentSplitter.sol";
 
 contract WildWestToken is ERC20, Ownable {
     using SafeMath for uint256;
@@ -19,21 +21,22 @@ contract WildWestToken is ERC20, Ownable {
 
     DividendTracker public dividendTracker;
 
-    address private marketingWallet;
-    address private teamWallet;
+    address public marketingWallet;
+    address public teamWallet;
+    TempWallet private tempWallet;
 
     uint256 public swapTokensAtAmount;
 
     uint256 public tradingActiveBlock = 0; // 0 means trading is not active
     uint256 public tradingActiveTimestamp = 0; // 0 means trading is not active
 
-    bool public limitsInEffect = true;
     bool public tradingActive = false;
     bool public swapEnabled = false;
 
     uint256 public constant feeDivisor = 1e4;
-    uint256 public constant taxDecayPeriod = 35 days;
-    uint256 public constant maxJeetTax = 3500;
+    uint256 public constant taxDecayPeriod = 45 days;
+    uint256 public maxJeetTax = 2000;
+    bool public jeetTaxEnabled = true;
 
     uint256 public sellFee;
     uint256 public buyFee;
@@ -90,7 +93,7 @@ contract WildWestToken is ERC20, Ownable {
         uint256 supply = 1e12 * (10**decimals());
         uint256 initialBurn = supply / 2;
 
-        swapTokensAtAmount = ((supply - initialBurn) * 1) / 1e4;
+        swapTokensAtAmount = ((supply - initialBurn) * 1) / 1e5;
 
         buyFee = 400;
         sellFee = 1000;
@@ -108,10 +111,10 @@ contract WildWestToken is ERC20, Ownable {
             teamRatioForBuys +
             burnRatioForBuys;
 
-        rewardsRatioForSells = 700;
-        marketingRatioForSells = 200;
+        rewardsRatioForSells = 7;
+        marketingRatioForSells = 2;
         liquidityRatioForSells = 0;
-        teamRatioForSells = 100;
+        teamRatioForSells = 1;
         burnRatioForSells = 0;
 
         totalRatioForSells =
@@ -122,12 +125,21 @@ contract WildWestToken is ERC20, Ownable {
             burnRatioForSells;
 
         dividendTracker = new DividendTracker();
-        marketingWallet = address(42);
-        teamWallet = address(1337);
+        marketingWallet = address(0x684A4ac55165834fcE48CdfA13B3acf1A07aA399);
         router = IMemeticSwapV1Router01(
             0x1b3813aC0863afFF2b4E8716fcFeb5Bf382b1DD1
         );
         memetic = ERC20(0xE5Ca307249662fe2Dc4c91c91aab44ea8578E671);
+
+        address[] memory recipients = new address[](2);
+        recipients[0] = 0xCcb50a6A2C58Ae55E3aa349289C4f9F697669fC9;
+        recipients[1] = 0x0c1B7cB060705355f67026B3B63DF882abD1C738;
+
+        uint256[] memory shares = new uint256[](2);
+        shares[0] = 1;
+        shares[1] = 1;
+
+        teamWallet = address(new PaymentSplitter(recipients, shares));
 
         // exclude from receiving dividends
         dividendTracker.excludeFromDividends(address(dividendTracker));
@@ -141,6 +153,9 @@ contract WildWestToken is ERC20, Ownable {
         excludeFromFees(address(this), true);
         excludeFromFees(address(0xdead), true);
         excludeFromFees(marketingWallet, true);
+        excludeFromFees(teamWallet, true);
+
+        tempWallet = new TempWallet();
 
         _mint(address(0xdead), initialBurn);
         _mint(owner(), supply - initialBurn);
@@ -410,6 +425,10 @@ contract WildWestToken is ERC20, Ownable {
     }
 
     function getJeetTax() public view returns (uint256) {
+        if (!jeetTaxEnabled) {
+            return 0;
+        }
+
         uint256 timeSinceLaunch = block.timestamp - tradingActiveTimestamp;
 
         if (timeSinceLaunch >= taxDecayPeriod) {
@@ -467,19 +486,23 @@ contract WildWestToken is ERC20, Ownable {
 
         // no taxes on transfers (non-buys/sells)
         if (takeFee) {
-            bool isBuy = automatedMarketMakerPairs[to];
-            bool isSell = automatedMarketMakerPairs[from];
+            bool isBuy = automatedMarketMakerPairs[from];
+            bool isSell = automatedMarketMakerPairs[to];
 
-            if (isBuy) {
+            if (isBuy && buyFee > 0 && totalRatioForBuys > 0) {
                 fees = amount.mul(buyFee).div(feeDivisor);
                 processBuyFee(from, fees);
-            } else if (isSell) {
+            } else if (isSell && sellFee > 0 && totalRatioForSells > 0) {
                 fees = amount.mul(sellFee).div(feeDivisor);
 
                 uint256 jeetFee = amount.mul(getJeetTax()).div(feeDivisor);
                 if (jeetFee > 0) {
-                    super._transfer(from, address(0xdead), jeetFee);
+                    uint256 rewardsShare = jeetFee.mul(25).div(100);
+                    uint256 burnShare = jeetFee.sub(rewardsShare);
+                    super._transfer(from, address(0xdead), burnShare);
+                    super._transfer(from, address(this), rewardsShare);
                     amount -= jeetFee;
+                    rewardsBalance += rewardsShare;
                 }
 
                 processSellFee(from, fees);
@@ -534,7 +557,7 @@ contract WildWestToken is ERC20, Ownable {
     }
 
     function processBuyFee(address from, uint256 fee) private {
-        if (fee == 0) {
+        if (fee == 0 || totalRatioForBuys == 0) {
             return;
         }
 
@@ -554,12 +577,14 @@ contract WildWestToken is ERC20, Ownable {
             .sub(liquidityShare)
             .sub(teamShare);
 
-        super._transfer(from, address(0xdead), burnShare);
-        super._transfer(
-            from,
-            address(this),
-            liquidityShare + rewardsShare + marketingShare + teamShare
-        );
+        if (burnShare > 0) {
+            super._transfer(from, address(0xdead), burnShare);
+        }
+
+        uint256 nonBurnedFee = fee.sub(burnShare);
+        if (nonBurnedFee > 0) {
+            super._transfer(from, address(this), nonBurnedFee);
+        }
 
         rewardsBalance += rewardsShare;
         liquidityBalance += liquidityShare;
@@ -568,7 +593,7 @@ contract WildWestToken is ERC20, Ownable {
     }
 
     function processSellFee(address from, uint256 fee) private {
-        if (fee == 0) {
+        if (fee == 0 || totalRatioForSells == 0) {
             return;
         }
 
@@ -588,12 +613,14 @@ contract WildWestToken is ERC20, Ownable {
             .sub(liquidityShare)
             .sub(teamShare);
 
-        super._transfer(from, address(0xdead), burnShare);
-        super._transfer(
-            from,
-            address(this),
-            liquidityShare + rewardsShare + marketingShare + teamShare
-        );
+        if (burnShare > 0) {
+            super._transfer(from, address(0xdead), burnShare);
+        }
+
+        uint256 nonBurnedFee = fee.sub(burnShare);
+        if (nonBurnedFee > 0) {
+            super._transfer(from, address(this), nonBurnedFee);
+        }
 
         rewardsBalance += rewardsShare;
         liquidityBalance += liquidityShare;
@@ -614,16 +641,35 @@ contract WildWestToken is ERC20, Ownable {
             half,
             0,
             path,
-            pair,
+            address(tempWallet),
             block.timestamp
         );
+        tempWallet.withdrawERC20(address(memetic));
 
-        super._transfer(address(this), pair, otherHalf);
-        IMemeticSwapV1Pair(pair).mint(address(0xdead));
+        _approve(address(this), address(router), otherHalf);
+        memetic.approve(address(router), memetic.balanceOf(address(this)));
+        router.addLiquidity(
+            address(this),
+            address(memetic),
+            otherHalf,
+            memetic.balanceOf(address(this)),
+            0,
+            0,
+            address(0xdead),
+            block.timestamp
+        );
     }
 
     function swapAndDistributeFees() private {
         uint256 contractTokenBalance = balanceOf(address(this));
+        require(
+            contractTokenBalance >=
+                liquidityBalance +
+                    rewardsBalance +
+                    marketingBalance +
+                    teamBalance,
+            "Contract balance is not equal to the sum of all fee balances"
+        );
 
         if (contractTokenBalance == 0) {
             return;
@@ -669,5 +715,22 @@ contract WildWestToken is ERC20, Ownable {
 
     function setSwapThreshold(uint256 amount) external onlyOwner {
         swapTokensAtAmount = amount;
+    }
+
+    function setMarketingWallet(address payable wallet) external onlyOwner {
+        marketingWallet = wallet;
+    }
+
+    function setTeamWallet(address payable wallet) external onlyOwner {
+        teamWallet = wallet;
+    }
+
+    function toggleJeetTax(bool enabled) external onlyOwner {
+        jeetTaxEnabled = enabled;
+    }
+
+    function setJeetTax(uint256 tax) external onlyOwner {
+        require(tax <= 3500, "Jeet tax cannot be more than 35%");
+        maxJeetTax = tax;
     }
 }
